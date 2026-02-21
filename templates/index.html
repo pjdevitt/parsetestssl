@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>testssl.sh Security Findings</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>testssl.sh Security Findings</h1>
+      <p class="subtitle">Upload the JSON output (for example from <code>testssl.sh --jsonfile out.json ...</code>) and generate an HTML report focused on security issues.</p>
+
+      <form method="post" enctype="multipart/form-data" class="panel">
+        <label for="jsonFile">Upload JSON file</label>
+        <input id="jsonFile" name="jsonFile" type="file" accept="application/json,.json" />
+
+        <label for="jsonText">Or paste JSON</label>
+        <textarea id="jsonText" name="jsonText" rows="10" placeholder="Paste testssl.sh JSON output here..."></textarea>
+
+        <label for="minSeverity">Minimum severity</label>
+        <select id="minSeverity" name="minSeverity">
+          <option value="LOW" {{if eq .MinSeverity "LOW"}}selected{{end}}>LOW</option>
+          <option value="MEDIUM" {{if eq .MinSeverity "MEDIUM"}}selected{{end}}>MEDIUM</option>
+          <option value="HIGH" {{if eq .MinSeverity "HIGH"}}selected{{end}}>HIGH</option>
+          <option value="CRITICAL" {{if eq .MinSeverity "CRITICAL"}}selected{{end}}>CRITICAL</option>
+        </select>
+
+        <button type="submit">Analyze</button>
+      </form>
+
+      {{if .Error}}
+      <section class="panel error">
+        <strong>Error:</strong> {{.Error}}
+      </section>
+      {{end}}
+
+      {{if gt .RawCount 0}}
+      <section class="panel">
+        <h2>Summary</h2>
+        <p>Total parsed findings: <strong>{{.RawCount}}</strong></p>
+        <p>Security findings after filters: <strong>{{.SecurityCount}}</strong></p>
+      </section>
+      {{end}}
+
+      {{if gt .SecurityCount 0}}
+      <section class="panel">
+        <h2>Security Findings</h2>
+        <div class="table-wrap">
+          <table class="stack-table">
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Category</th>
+                <th>ID</th>
+                <th>Finding</th>
+                <th>Host</th>
+                <th>Port</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{range .Findings}}
+              <tr>
+                <td><span class="sev sev-{{.Severity}}">{{.Severity}}</span></td>
+                <td>{{.Category}}</td>
+                <td>{{.ID}}</td>
+                <td>{{.Finding}}</td>
+                <td>{{.Host}}</td>
+                <td>{{.Port}}</td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Issue Matrix (Rows = Issues, Columns = IP/Host)</h2>
+        <div class="table-wrap">
+          <table class="matrix-table">
+            <thead>
+              <tr>
+                <th class="issue-col">Issue</th>
+                {{range .MatrixHosts}}
+                <th>{{.}}</th>
+                {{end}}
+              </tr>
+            </thead>
+            <tbody>
+              {{range .MatrixRows}}
+              <tr>
+                <td class="issue-col">
+                  <strong>{{.Category}}</strong><br />
+                  {{if .IssueID}}<code>{{.IssueID}}</code> - {{end}}{{.Issue}}
+                </td>
+                {{range .Cells}}
+                <td>
+                  {{if .}}
+                  <span class="sev sev-{{.}}">{{.}}</span>
+                  {{else}}
+                  <span class="muted">-</span>
+                  {{end}}
+                </td>
+                {{end}}
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {{if gt (len .WeakCiphers) 0}}
+      <section class="panel">
+        <h2>Weak Ciphers</h2>
+        {{range .WeakGroups}}
+        <h3>{{.Host}}</h3>
+        <div class="table-wrap">
+          <table class="stack-table">
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Port</th>
+                <th>Cipher</th>
+                <th>Risk Types</th>
+                <th>ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{range .Rows}}
+              <tr>
+                <td><span class="sev sev-{{.Severity}}">{{.Severity}}</span></td>
+                <td>{{.Port}}</td>
+                <td><code>{{.Suite}}</code></td>
+                <td>{{.Risks}}</td>
+                <td><code>{{.ID}}</code></td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        {{end}}
+      </section>
+      {{end}}
+      {{end}}
+
+      {{if and (eq .SecurityCount 0) (gt .RawCount 0)}}
+      <section class="panel">
+        <p>No security findings matched the selected severity threshold.</p>
+      </section>
+      {{end}}
+    </main>
+  </body>
+</html>

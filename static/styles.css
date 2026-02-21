@@ -1,0 +1,152 @@
+:root {
+  --bg: #f8fafc;
+  --panel: #ffffff;
+  --text: #1f2937;
+  --muted: #4b5563;
+  --border: #d1d5db;
+  --danger: #7f1d1d;
+  --accent: #0f766e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: var(--text);
+  background: radial-gradient(circle at top right, #dbeafe, #f8fafc 55%);
+}
+
+.container {
+  max-width: 1080px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+}
+
+h1 {
+  margin-bottom: 0.5rem;
+}
+
+.subtitle {
+  color: var(--muted);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+.error {
+  border-color: #fecaca;
+  color: var(--danger);
+  background: #fef2f2;
+}
+
+form {
+  display: grid;
+  gap: 0.65rem;
+}
+
+label {
+  font-weight: 600;
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+  padding: 0.6rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+button {
+  background: var(--accent);
+  color: white;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.issue-col {
+  min-width: 320px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+th,
+td {
+  text-align: left;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 0.6rem;
+  vertical-align: top;
+}
+
+.sev {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.sev-CRITICAL,
+.sev-HIGH {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.sev-MEDIUM {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.sev-LOW,
+.sev-WARN,
+.sev-UNKNOWN {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+@media (max-width: 768px) {
+  .stack-table,
+  .stack-table thead,
+  .stack-table tbody,
+  .stack-table th,
+  .stack-table td,
+  .stack-table tr {
+    display: block;
+  }
+
+  .stack-table thead {
+    display: none;
+  }
+
+  .stack-table tr {
+    border-bottom: 1px solid #e5e7eb;
+    margin-bottom: 0.5rem;
+  }
+
+  .stack-table td {
+    border: none;
+    padding: 0.4rem 0;
+  }
+}
