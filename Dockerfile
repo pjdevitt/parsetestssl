@@ -9,6 +9,7 @@ RUN go mod download
 COPY main.go ./
 COPY templates ./templates
 COPY static ./static
+COPY report_templates ./report_templates
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /app/parsetestssl .
 
@@ -20,6 +21,7 @@ RUN addgroup -S app && adduser -S -G app app
 COPY --from=builder /app/parsetestssl ./parsetestssl
 COPY --from=builder /src/templates ./templates
 COPY --from=builder /src/static ./static
+COPY --from=builder /src/report_templates ./report_templates
 
 USER app
 EXPOSE 8080
