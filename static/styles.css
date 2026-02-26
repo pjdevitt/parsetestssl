@@ -100,6 +100,11 @@ td {
   vertical-align: top;
 }
 
+.check-cell {
+  text-align: center;
+  font-weight: 700;
+}
+
 .sev {
   display: inline-block;
   border-radius: 999px;
@@ -124,6 +129,22 @@ td {
 .sev-UNKNOWN {
   background: #fef9c3;
   color: #854d0e;
+}
+
+.report-item {
+  border-top: 1px solid #e5e7eb;
+  padding-top: 0.8rem;
+  margin-top: 0.8rem;
+}
+
+.report-markdown {
+  white-space: pre-wrap;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 0.8rem;
+  margin: 0.5rem 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
 @media (max-width: 768px) {

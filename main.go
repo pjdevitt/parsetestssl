@@ -2,14 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 type Finding struct {
@@ -25,16 +28,20 @@ type Finding struct {
 }
 
 type ViewData struct {
-	Findings      []Finding
-	RawCount      int
-	SecurityCount int
-	MinSeverity   string
-	Error         string
-	SourcePreview string
-	MatrixHosts   []string
-	MatrixRows    []IssueMatrixRow
-	WeakCiphers   []WeakCipher
-	WeakGroups    []WeakCipherGroup
+	Findings           []Finding
+	RawCount           int
+	SecurityCount      int
+	MinSeverity        string
+	Error              string
+	SourcePreview      string
+	MatrixHosts        []string
+	MatrixRows         []IssueMatrixRow
+	WeakCiphers        []WeakCipher
+	WeakGroups         []WeakCipherGroup
+	WeakRiskTypes      []string
+	WeakHostRisks      []WeakHostRiskRow
+	RecommendedCiphers []RecommendedCipher
+	CipherReports      []CipherWeaknessReport
 }
 
 type IssueMatrixRow struct {
@@ -45,13 +52,15 @@ type IssueMatrixRow struct {
 }
 
 type WeakCipher struct {
-	Severity string
-	Host     string
-	Port     string
-	ID       string
-	Suite    string
-	Risks    string
-	Finding  string
+	Severity  string
+	Host      string
+	Port      string
+	ID        string
+	Suite     string
+	Risks     string
+	RiskList  []string
+	RiskFlags []bool
+	Finding   string
 }
 
 type WeakCipherGroup struct {
@@ -59,7 +68,34 @@ type WeakCipherGroup struct {
 	Rows []WeakCipher
 }
 
+type WeakHostRiskRow struct {
+	Host      string
+	RiskFlags []bool
+}
+
+type RecommendedCipher struct {
+	Host   string
+	Port   string
+	Suite  string
+	TLS10  bool
+	TLS11  bool
+	TLS12  bool
+	TLS13  bool
+	Reason string
+}
+
+type CipherWeaknessReport struct {
+	Name         string
+	TemplateFile string
+	Count        int
+	Content      string
+}
+
 var tpl = template.Must(template.ParseFiles("templates/index.html"))
+
+const maxRequestBytes int64 = 12 << 20
+
+var reportTemplatesDir = "report_templates"
 
 var severityScore = map[string]int{
 	"OK":       0,
@@ -72,12 +108,17 @@ var severityScore = map[string]int{
 	"UNKNOWN":  2,
 }
 
-var categoryPatterns = map[string][]string{
-	"Protocol Weakness":       {"sslv2", "sslv3", "tls1", "tls1_1", "poodle", "drown"},
-	"Cipher Weakness":         {"rc4", "3des", "sweet32", "freak", "logjam", "null cipher", "export"},
-	"Known Vulnerability":     {"heartbleed", "ticketbleed", "robot", "ccs", "crime", "breach", "lucky13", "renegotiation"},
-	"Certificate Risk":        {"expired", "not valid", "self-signed", "revocation", "cert", "ocsp", "hostname mismatch"},
-	"Configuration Hardening": {"hsts", "secure renegotiation", "forward secrecy", "session resumption", "compression"},
+type categoryRule struct {
+	Category string
+	Patterns []string
+}
+
+var categoryRules = []categoryRule{
+	{Category: "Protocol Weakness", Patterns: []string{"sslv2", "sslv3", "tls1", "tls1_1", "poodle", "drown"}},
+	{Category: "Cipher Weakness", Patterns: []string{"rc4", "3des", "sweet32", "freak", "logjam", "null cipher", "export"}},
+	{Category: "Known Vulnerability", Patterns: []string{"heartbleed", "ticketbleed", "robot", "ccs", "crime", "breach", "lucky13", "renegotiation"}},
+	{Category: "Certificate Risk", Patterns: []string{"expired", "not valid", "self-signed", "revocation", "cert", "ocsp", "hostname mismatch"}},
+	{Category: "Configuration Hardening", Patterns: []string{"hsts", "secure renegotiation", "forward secrecy", "session resumption", "compression"}},
 }
 
 func main() {
@@ -97,6 +138,8 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	data := ViewData{MinSeverity: "MEDIUM"}
 
 	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+
 		raw, minSeverity, err := readInput(r)
 		data.MinSeverity = minSeverity
 
@@ -122,9 +165,14 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 		data.RawCount = len(allFindings)
 		data.Findings = filterSecurityFindings(allFindings, minSeverity)
 		data.SecurityCount = len(data.Findings)
+		data.RecommendedCiphers = buildRecommendedCipherRows(allFindings)
 		data.MatrixHosts, data.MatrixRows = buildIssueMatrix(data.Findings)
-		data.WeakCiphers = buildWeakCipherRows(data.Findings)
+		weakRows := buildWeakCipherRows(data.Findings)
+		data.WeakRiskTypes = collectWeakRiskTypes(weakRows)
+		data.WeakCiphers = annotateWeakCipherRiskFlags(weakRows, data.WeakRiskTypes)
+		data.WeakHostRisks = buildWeakHostRiskRows(data.WeakCiphers, data.WeakRiskTypes)
 		data.WeakGroups = groupWeakCiphersByHost(data.WeakCiphers)
+		data.CipherReports = buildCipherWeaknessReports(data.WeakCiphers)
 	}
 
 	render(w, data)
@@ -137,8 +185,20 @@ func render(w http.ResponseWriter, data ViewData) {
 }
 
 func readInput(r *http.Request) ([]byte, string, error) {
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
-		return nil, "MEDIUM", fmt.Errorf("unable to read form: %w", err)
+	contentType := strings.ToLower(r.Header.Get("Content-Type"))
+	parseErr := error(nil)
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		parseErr = r.ParseMultipartForm(10 << 20)
+	} else {
+		parseErr = r.ParseForm()
+	}
+
+	if parseErr != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(parseErr, &maxErr) {
+			return nil, "MEDIUM", fmt.Errorf("request is too large (max %d MB)", maxRequestBytes>>20)
+		}
+		return nil, "MEDIUM", fmt.Errorf("unable to read form: %w", parseErr)
 	}
 
 	minSeverity := strings.ToUpper(strings.TrimSpace(r.FormValue("minSeverity")))
@@ -146,16 +206,18 @@ func readInput(r *http.Request) ([]byte, string, error) {
 		minSeverity = "MEDIUM"
 	}
 
-	if f, _, err := r.FormFile("jsonFile"); err == nil {
-		defer f.Close()
-		b, readErr := io.ReadAll(f)
-		if readErr != nil {
-			return nil, minSeverity, fmt.Errorf("failed reading upload: %w", readErr)
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		if f, _, err := r.FormFile("jsonFile"); err == nil {
+			defer f.Close()
+			b, readErr := io.ReadAll(f)
+			if readErr != nil {
+				return nil, minSeverity, fmt.Errorf("failed reading upload: %w", readErr)
+			}
+			if len(strings.TrimSpace(string(b))) == 0 {
+				return nil, minSeverity, fmt.Errorf("uploaded file is empty")
+			}
+			return b, minSeverity, nil
 		}
-		if len(strings.TrimSpace(string(b))) == 0 {
-			return nil, minSeverity, fmt.Errorf("uploaded file is empty")
-		}
-		return b, minSeverity, nil
 	}
 
 	text := strings.TrimSpace(r.FormValue("jsonText"))
@@ -243,10 +305,10 @@ func firstNonEmpty(m map[string]any, keys ...string) string {
 
 func categorize(text string) string {
 	l := strings.ToLower(text)
-	for category, patterns := range categoryPatterns {
-		for _, p := range patterns {
+	for _, rule := range categoryRules {
+		for _, p := range rule.Patterns {
 			if strings.Contains(l, p) {
-				return category
+				return rule.Category
 			}
 		}
 	}
@@ -416,6 +478,9 @@ func matrixIssuesForFinding(f Finding) []IssueMatrixRow {
 func buildWeakCipherRows(findings []Finding) []WeakCipher {
 	rows := make([]WeakCipher, 0)
 	for _, f := range findings {
+		if strings.EqualFold(strings.TrimSpace(f.ID), "cipherlist_OBSOLETED") {
+			continue
+		}
 		if !isCipherFinding(f) {
 			continue
 		}
@@ -434,6 +499,7 @@ func buildWeakCipherRows(findings []Finding) []WeakCipher {
 			ID:       strings.TrimSpace(f.ID),
 			Suite:    extractCipherSuite(f),
 			Risks:    strings.Join(risks, ", "),
+			RiskList: risks,
 			Finding:  strings.TrimSpace(f.Finding),
 		})
 	}
@@ -452,6 +518,99 @@ func buildWeakCipherRows(findings []Finding) []WeakCipher {
 	})
 
 	return rows
+}
+
+func collectWeakRiskTypes(rows []WeakCipher) []string {
+	seen := make(map[string]struct{})
+	for _, row := range rows {
+		for _, risk := range row.RiskList {
+			name := strings.TrimSpace(risk)
+			if name == "" {
+				continue
+			}
+			seen[name] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(seen))
+	for risk := range seen {
+		out = append(out, risk)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func annotateWeakCipherRiskFlags(rows []WeakCipher, riskTypes []string) []WeakCipher {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	out := make([]WeakCipher, 0, len(rows))
+	for _, row := range rows {
+		rowRisk := make(map[string]struct{}, len(row.RiskList))
+		for _, risk := range row.RiskList {
+			name := strings.TrimSpace(risk)
+			if name == "" {
+				continue
+			}
+			rowRisk[name] = struct{}{}
+		}
+
+		flags := make([]bool, len(riskTypes))
+		for i, riskType := range riskTypes {
+			_, ok := rowRisk[riskType]
+			flags[i] = ok
+		}
+
+		row.RiskFlags = flags
+		out = append(out, row)
+	}
+	return out
+}
+
+func buildWeakHostRiskRows(rows []WeakCipher, riskTypes []string) []WeakHostRiskRow {
+	if len(rows) == 0 || len(riskTypes) == 0 {
+		return nil
+	}
+
+	hostRisk := make(map[string]map[string]struct{})
+	for _, row := range rows {
+		host := strings.TrimSpace(row.Host)
+		if host == "" {
+			host = "Unknown host"
+		}
+		if _, ok := hostRisk[host]; !ok {
+			hostRisk[host] = make(map[string]struct{})
+		}
+		for _, risk := range row.RiskList {
+			name := strings.TrimSpace(risk)
+			if name == "" {
+				continue
+			}
+			hostRisk[host][name] = struct{}{}
+		}
+	}
+
+	hosts := make([]string, 0, len(hostRisk))
+	for host := range hostRisk {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+
+	out := make([]WeakHostRiskRow, 0, len(hosts))
+	for _, host := range hosts {
+		flags := make([]bool, len(riskTypes))
+		for i, risk := range riskTypes {
+			_, ok := hostRisk[host][risk]
+			flags[i] = ok
+		}
+		out = append(out, WeakHostRiskRow{
+			Host:      host,
+			RiskFlags: flags,
+		})
+	}
+
+	return out
 }
 
 func groupWeakCiphersByHost(rows []WeakCipher) []WeakCipherGroup {
@@ -485,12 +644,22 @@ func groupWeakCiphersByHost(rows []WeakCipher) []WeakCipherGroup {
 }
 
 func isCipherFinding(f Finding) bool {
-	id := strings.ToLower(f.ID)
+	id := strings.ToLower(strings.TrimSpace(f.ID))
 	finding := strings.ToLower(f.Finding)
-	if strings.Contains(id, "cipher") {
+	if strings.HasPrefix(id, "cipher-") ||
+		strings.HasPrefix(id, "cipher_") ||
+		strings.HasPrefix(id, "cipherlist_") ||
+		strings.HasPrefix(id, "supportedciphers_") ||
+		strings.HasPrefix(id, "cipherorder_") {
 		return true
 	}
-	return strings.Contains(finding, "tls_") || strings.Contains(finding, "tlsv1.")
+	if strings.Contains(finding, "tls_") && strings.Contains(finding, "_with_") {
+		return true
+	}
+	if strings.Contains(finding, "tlsv1.") && strings.Contains(finding, "_with_") {
+		return true
+	}
+	return strings.Contains(finding, "tlsv1.3") && strings.Contains(finding, "tls_")
 }
 
 func cipherRiskTypes(f Finding) []string {
@@ -551,4 +720,232 @@ func extractCipherSuite(f Finding) string {
 		return strings.TrimSpace(f.ID)
 	}
 	return strings.TrimSpace(f.Finding)
+}
+
+func buildRecommendedCipherRows(all []Finding) []RecommendedCipher {
+	type acc struct {
+		Suite string
+		TLS10 bool
+		TLS11 bool
+		TLS12 bool
+		TLS13 bool
+	}
+	agg := make(map[string]*acc)
+
+	for _, f := range all {
+		if !isCipherSuiteFinding(f) || !isStrongCipherFinding(f) {
+			continue
+		}
+
+		suite := strings.TrimSpace(extractCipherSuite(f))
+		if suite == "" {
+			continue
+		}
+
+		key := strings.ToLower(suite)
+		item, ok := agg[key]
+		if !ok {
+			item = &acc{
+				Suite: suite,
+			}
+			agg[key] = item
+		}
+		tls10, tls11, tls12, tls13 := detectCipherProtocol(f)
+		item.TLS10 = item.TLS10 || tls10
+		item.TLS11 = item.TLS11 || tls11
+		item.TLS12 = item.TLS12 || tls12
+		item.TLS13 = item.TLS13 || tls13
+	}
+
+	out := make([]RecommendedCipher, 0, len(agg))
+	for _, item := range agg {
+		out = append(out, RecommendedCipher{
+			Suite:  item.Suite,
+			TLS10:  item.TLS10,
+			TLS11:  item.TLS11,
+			TLS12:  item.TLS12,
+			TLS13:  item.TLS13,
+			Reason: recommendedCipherReason(item.Suite),
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Suite < out[j].Suite
+	})
+
+	return out
+}
+
+func detectCipherProtocol(f Finding) (bool, bool, bool, bool) {
+	text := strings.ToLower(strings.TrimSpace(f.ID + " " + f.Finding))
+	isTLS10 := strings.Contains(text, "tlsv1.0") || strings.Contains(text, "tls1_0") || strings.Contains(text, "tlsv1 ")
+	isTLS11 := strings.Contains(text, "tlsv1.1") || strings.Contains(text, "tls1_1")
+	isTLS12 := strings.Contains(text, "tlsv1.2") || strings.Contains(text, "tls1_2")
+	isTLS13 := strings.Contains(text, "tlsv1.3") || strings.Contains(text, "tls1_3")
+	return isTLS10, isTLS11, isTLS12, isTLS13
+}
+
+func isCipherSuiteFinding(f Finding) bool {
+	id := strings.ToLower(strings.TrimSpace(f.ID))
+	if !strings.HasPrefix(id, "cipher-") {
+		return false
+	}
+	fields := strings.Fields(strings.TrimSpace(f.Finding))
+	return len(fields) >= 3 && strings.HasPrefix(strings.ToUpper(fields[0]), "TLSV")
+}
+
+func isStrongCipherFinding(f Finding) bool {
+	suite := strings.ToUpper(strings.TrimSpace(extractCipherSuite(f)))
+	if suite == "" {
+		return false
+	}
+	text := strings.ToUpper(strings.TrimSpace(f.ID + " " + f.Finding + " " + suite))
+
+	if strings.Contains(text, "RC4") ||
+		strings.Contains(text, "3DES") ||
+		strings.Contains(text, "DES-CBC") ||
+		strings.Contains(text, "_NULL_") ||
+		strings.Contains(text, "ANULL") ||
+		strings.Contains(text, "EXPORT") ||
+		strings.Contains(text, "CAMELLIA") ||
+		strings.Contains(text, " CBC") ||
+		strings.Contains(text, "_CBC_") {
+		return false
+	}
+	if strings.Contains(text, "SHA") &&
+		!strings.Contains(text, "SHA256") &&
+		!strings.Contains(text, "SHA384") &&
+		!strings.Contains(text, "SHA512") {
+		return false
+	}
+
+	// Pre-TLS 1.3 suites should be FS + AEAD to be considered recommended.
+	if !strings.Contains(strings.ToLower(f.Finding), "tlsv1.3") {
+		if !(strings.Contains(text, "ECDHE") || strings.Contains(text, " DHE")) {
+			return false
+		}
+		if !(strings.Contains(text, "GCM") || strings.Contains(text, "CHACHA20_POLY1305")) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func strongCipherReason(f Finding) string {
+	suite := strings.ToUpper(strings.TrimSpace(extractCipherSuite(f)))
+	text := strings.ToUpper(strings.TrimSpace(f.ID + " " + f.Finding + " " + suite))
+	reasons := make([]string, 0, 3)
+
+	if strings.Contains(strings.ToLower(f.Finding), "tlsv1.3") {
+		reasons = append(reasons, "TLS 1.3")
+	}
+	if strings.Contains(text, "GCM") || strings.Contains(text, "CHACHA20_POLY1305") {
+		reasons = append(reasons, "AEAD")
+	}
+	if strings.Contains(text, "ECDHE") || strings.Contains(text, " DHE") || strings.Contains(strings.ToLower(f.Finding), "tlsv1.3") {
+		reasons = append(reasons, "Forward secrecy")
+	}
+
+	if len(reasons) == 0 {
+		return "Modern strong cipher profile"
+	}
+	return strings.Join(reasons, ", ")
+}
+
+func recommendedCipherReason(suite string) string {
+	upper := strings.ToUpper(strings.TrimSpace(suite))
+	reasons := make([]string, 0, 2)
+	if strings.Contains(upper, "GCM") || strings.Contains(upper, "CHACHA20_POLY1305") {
+		reasons = append(reasons, "AEAD")
+	}
+	if strings.Contains(upper, "ECDHE") || strings.Contains(upper, "_DHE_") {
+		reasons = append(reasons, "Forward secrecy")
+	}
+	if len(reasons) == 0 {
+		return "Modern strong cipher profile"
+	}
+	return strings.Join(reasons, ", ")
+}
+
+func buildCipherWeaknessReports(rows []WeakCipher) []CipherWeaknessReport {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	counts := make(map[string]int)
+	for _, row := range rows {
+		source := row.RiskList
+		if len(source) == 0 && strings.TrimSpace(row.Risks) != "" {
+			source = strings.Split(row.Risks, ",")
+		}
+		for _, part := range source {
+			name := strings.TrimSpace(part)
+			if name == "" {
+				continue
+			}
+			counts[name]++
+		}
+	}
+
+	names := make([]string, 0, len(counts))
+	for name := range counts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]CipherWeaknessReport, 0, len(names))
+	for _, name := range names {
+		fileName := weaknessTemplateFileName(name)
+		content := loadWeaknessTemplate(fileName)
+		out = append(out, CipherWeaknessReport{
+			Name:         name,
+			TemplateFile: fileName,
+			Count:        counts[name],
+			Content:      content,
+		})
+	}
+
+	return out
+}
+
+func weaknessTemplateFileName(name string) string {
+	return slugify(name) + ".md"
+}
+
+func loadWeaknessTemplate(fileName string) string {
+	path := filepath.Join(reportTemplatesDir, fileName)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("Template not found: %s", fileName)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return "unknown"
+	}
+
+	var b strings.Builder
+	prevUnderscore := false
+	for _, r := range s {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r):
+			b.WriteRune(r)
+			prevUnderscore = false
+		default:
+			if !prevUnderscore {
+				b.WriteByte('_')
+				prevUnderscore = true
+			}
+		}
+	}
+
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "unknown"
+	}
+	return out
 }
