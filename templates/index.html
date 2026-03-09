@@ -3,20 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>testssl.sh Security Findings</title>
+    <title>testssl.sh Report Parser</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <main class="container">
-      <h1>testssl.sh Security Findings</h1>
-      <p class="subtitle">Upload the JSON output (for example from <code>testssl.sh --jsonfile out.json ...</code>) and generate an HTML report focused on security issues.</p>
+      <h1>testssl.sh Report Parser</h1>
+      <p class="subtitle">Upload JSON output (for example <code>--jsonfile out.json</code>) or plain log output (for example <code>--log</code>) to extract security findings, protocols, and supported ciphers.</p>
 
       <form method="post" enctype="multipart/form-data" class="panel">
-        <label for="jsonFile">Upload JSON file</label>
-        <input id="jsonFile" name="jsonFile" type="file" accept="application/json,.json" />
+        <label for="jsonFile">Upload JSON or log file</label>
+        <input id="jsonFile" name="jsonFile" type="file" accept="application/json,text/plain,.json,.log,.txt" />
 
-        <label for="jsonText">Or paste JSON</label>
-        <textarea id="jsonText" name="jsonText" rows="10" placeholder="Paste testssl.sh JSON output here..."></textarea>
+        <label for="jsonText">Or paste JSON/log text</label>
+        <textarea id="jsonText" name="jsonText" rows="10" placeholder="Paste testssl.sh JSON or --log output here..."></textarea>
 
         <label for="minSeverity">Minimum severity</label>
         <select id="minSeverity" name="minSeverity">
@@ -35,11 +35,76 @@
       </section>
       {{end}}
 
-      {{if gt .RawCount 0}}
+      {{if or (gt .RawCount 0) (gt .LogProtocolCount 0) (gt .LogCipherCount 0)}}
       <section class="panel">
         <h2>Summary</h2>
+        {{if gt .RawCount 0}}
         <p>Total parsed findings: <strong>{{.RawCount}}</strong></p>
         <p>Security findings after filters: <strong>{{.SecurityCount}}</strong></p>
+        {{end}}
+        {{if gt .LogProtocolCount 0}}
+        <p>Parsed protocols: <strong>{{.LogProtocolCount}}</strong></p>
+        {{end}}
+        {{if gt .LogCipherCount 0}}
+        <p>Parsed supported ciphers: <strong>{{.LogCipherCount}}</strong></p>
+        {{end}}
+      </section>
+      {{end}}
+
+      {{if gt (len .LogProtocols) 0}}
+      <section class="panel">
+        <h2>Protocols</h2>
+        <div class="table-wrap">
+          <table class="stack-table">
+            <thead>
+              <tr>
+                <th>Protocol</th>
+                <th>Status</th>
+                <th>Raw</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{range .LogProtocols}}
+              <tr>
+                <td>{{.Name}}</td>
+                <td>{{if .Offered}}Offered{{else}}Not Offered{{end}}</td>
+                <td>{{.Raw}}</td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {{end}}
+
+      {{if gt (len .LogCipherGroups) 0}}
+      <section class="panel">
+        <h2>Supported Ciphers by Protocol</h2>
+        {{range .LogCipherGroups}}
+        <h3>{{.Protocol}}</h3>
+        {{if gt (len .Ciphers) 0}}
+        <div class="table-wrap">
+          <table class="stack-table">
+            <thead>
+              <tr>
+                <th>Cipher Suite (IANA)</th>
+                <th>Weakness Hints</th>
+              </tr>
+            </thead>
+            <tbody>
+              {{range .Ciphers}}
+              <tr>
+                <td><code>{{.Suite}}</code></td>
+                <td>{{.WeaknessSummary}}</td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        {{else}}
+        <p class="subtitle">No ciphers listed.</p>
+        {{end}}
+        {{end}}
       </section>
       {{end}}
 

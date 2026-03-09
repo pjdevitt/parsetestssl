@@ -4,7 +4,7 @@ A Golang web app that parses `testssl.sh` JSON output and renders an HTML report
 
 ## Features
 
-- Accepts uploaded JSON file or pasted JSON text
+- Accepts uploaded JSON/log file or pasted JSON/log text
 - Enforces a 12MB request size cap for uploads/body content
 - Extracts findings from flat or nested JSON structures
 - Filters by minimum severity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`)
@@ -21,6 +21,14 @@ testssl.sh --jsonfile out.json <host-or-url>
 ```
 
 Then upload `out.json` in the web UI.
+
+For log-based parsing:
+
+```bash
+testssl.sh --log https://example.com > scan.log
+```
+
+Then upload/paste `scan.log` to extract protocols and supported ciphers.
 
 ## Run
 
@@ -56,6 +64,32 @@ Open:
 - Parser is resilient to different key naming styles (`id`, `check`, `finding`, `result`, `severity`, etc.).
 - Cipher weakness report templates are loaded by slugged weakness name (for example `3DES / SWEET32` -> `report_templates/3des_sweet32.md`).
 - `cipherlist_OBSOLETED` is intentionally excluded from weak-cipher tables/report.
+
+## Alternative Log Parser Module
+
+For plain `testssl.sh --log` text output (for example `badssl.com_p443-20260308-1832.log`), use:
+
+- `ParseTestSSLLog(raw []byte) ParsedTestSSLLog`
+
+It extracts:
+
+- Protocols and whether each is offered
+- Supported ciphers grouped by protocol from the `Testing server's cipher preferences` section
+
+Example:
+
+```go
+raw, _ := os.ReadFile("badssl.com_p443-20260308-1832.log")
+parsed := ParseTestSSLLog(raw)
+
+for _, p := range parsed.Protocols {
+	fmt.Println(p.Name, p.Offered, p.Raw)
+}
+
+for proto, ciphers := range parsed.CiphersByProtocol {
+	fmt.Println(proto, len(ciphers))
+}
+```
 
 ## Project Context for Codex
 

@@ -88,6 +88,34 @@ func TestIndexHandlerRejectsOversizedRequest(t *testing.T) {
 	}
 }
 
+func TestIndexHandlerAcceptsLogTextInput(t *testing.T) {
+	raw, err := os.ReadFile("badssl.com_p443-20260308-1832.log")
+	if err != nil {
+		t.Fatalf("read log fixture: %v", err)
+	}
+
+	values := url.Values{
+		"minSeverity": {"MEDIUM"},
+		"jsonText":    {string(raw)},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	rr := httptest.NewRecorder()
+	indexHandler(rr, req)
+
+	body := rr.Body.String()
+	if strings.Contains(body, "could not parse JSON") {
+		t.Fatalf("did not expect JSON parse error for log input")
+	}
+	if !strings.Contains(body, "Supported Ciphers by Protocol") {
+		t.Fatalf("expected supported ciphers section for log input")
+	}
+	if !strings.Contains(body, "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256") {
+		t.Fatalf("expected known TLS 1.2 cipher in rendered output")
+	}
+}
+
 func TestCipherRiskTypes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -256,6 +284,60 @@ func TestBuildWeakHostRiskRows(t *testing.T) {
 	}
 	if got[1].Host != "host-b" || !reflect.DeepEqual(got[1].RiskFlags, []bool{false, false, true}) {
 		t.Fatalf("unexpected host-b row: %+v", got[1])
+	}
+}
+
+func TestCipherWeaknessesFromSuite(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{
+			name: "rsa cbc sha1",
+			in:   "TLS_RSA_WITH_AES_128_CBC_SHA",
+			want: []string{"CBC", "SHA-1 MAC", "No Forward Secrecy"},
+		},
+		{
+			name: "ecdhe gcm strong",
+			in:   "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+			want: nil,
+		},
+		{
+			name: "3des weakness",
+			in:   "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+			want: []string{"3DES / SWEET32", "CBC", "SHA-1 MAC", "No Forward Secrecy"},
+		},
+		{
+			name: "rc4 weakness",
+			in:   "TLS_RSA_WITH_RC4_128_SHA",
+			want: []string{"RC4", "SHA-1 MAC", "No Forward Secrecy"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cipherWeaknessesFromSuite(tc.in)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("cipherWeaknessesFromSuite() mismatch\nwant=%v\ngot=%v", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestBuildProtocolCipherGroups_IncludesWeaknessSummary(t *testing.T) {
+	groups := buildProtocolCipherGroups(map[string][]string{
+		"TLS 1.0": {"TLS_RSA_WITH_AES_128_CBC_SHA"},
+	})
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 protocol group, got %d", len(groups))
+	}
+	if len(groups[0].Ciphers) != 1 {
+		t.Fatalf("expected 1 cipher row, got %d", len(groups[0].Ciphers))
+	}
+	summary := groups[0].Ciphers[0].WeaknessSummary
+	if !strings.Contains(summary, "No Forward Secrecy") || !strings.Contains(summary, "CBC") {
+		t.Fatalf("expected weakness summary to mention No Forward Secrecy and CBC, got %q", summary)
 	}
 }
 

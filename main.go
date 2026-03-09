@@ -31,6 +31,8 @@ type ViewData struct {
 	Findings           []Finding
 	RawCount           int
 	SecurityCount      int
+	LogProtocolCount   int
+	LogCipherCount     int
 	MinSeverity        string
 	Error              string
 	SourcePreview      string
@@ -42,6 +44,8 @@ type ViewData struct {
 	WeakHostRisks      []WeakHostRiskRow
 	RecommendedCiphers []RecommendedCipher
 	CipherReports      []CipherWeaknessReport
+	LogProtocols       []LogProtocol
+	LogCipherGroups    []ProtocolCipherGroup
 }
 
 type IssueMatrixRow struct {
@@ -89,6 +93,17 @@ type CipherWeaknessReport struct {
 	TemplateFile string
 	Count        int
 	Content      string
+}
+
+type ProtocolCipherGroup struct {
+	Protocol string
+	Ciphers  []LogCipherRow
+}
+
+type LogCipherRow struct {
+	Suite           string
+	Weaknesses      []string
+	WeaknessSummary string
 }
 
 var tpl = template.Must(template.ParseFiles("templates/index.html"))
@@ -157,7 +172,19 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 
 		allFindings, err := parseFindings(raw)
 		if err != nil {
-			data.Error = fmt.Sprintf("could not parse JSON: %v", err)
+			parsedLog := ParseTestSSLLog(raw)
+			if len(parsedLog.Protocols) == 0 && len(parsedLog.CiphersByProtocol) == 0 {
+				data.Error = fmt.Sprintf("could not parse JSON: %v", err)
+				render(w, data)
+				return
+			}
+
+			data.LogProtocols = parsedLog.Protocols
+			data.LogProtocolCount = len(parsedLog.Protocols)
+			data.LogCipherGroups = buildProtocolCipherGroups(parsedLog.CiphersByProtocol)
+			for _, group := range data.LogCipherGroups {
+				data.LogCipherCount += len(group.Ciphers)
+			}
 			render(w, data)
 			return
 		}
@@ -176,6 +203,106 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	render(w, data)
+}
+
+func buildProtocolCipherGroups(byProtocol map[string][]string) []ProtocolCipherGroup {
+	if len(byProtocol) == 0 {
+		return nil
+	}
+
+	protocolOrder := map[string]int{
+		"SSLv2":   0,
+		"SSLv3":   1,
+		"TLS 1.0": 2,
+		"TLS 1.1": 3,
+		"TLS 1.2": 4,
+		"TLS 1.3": 5,
+	}
+
+	out := make([]ProtocolCipherGroup, 0, len(byProtocol))
+	for protocol, ciphers := range byProtocol {
+		copyCiphers := append([]string(nil), ciphers...)
+		sort.Strings(copyCiphers)
+		rows := make([]LogCipherRow, 0, len(copyCiphers))
+		for _, suite := range copyCiphers {
+			weaknesses := cipherWeaknessesFromSuite(suite)
+			summary := "-"
+			if len(weaknesses) > 0 {
+				summary = strings.Join(weaknesses, ", ")
+			}
+			rows = append(rows, LogCipherRow{
+				Suite:           suite,
+				Weaknesses:      weaknesses,
+				WeaknessSummary: summary,
+			})
+		}
+		out = append(out, ProtocolCipherGroup{
+			Protocol: protocol,
+			Ciphers:  rows,
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		oi, iok := protocolOrder[out[i].Protocol]
+		oj, jok := protocolOrder[out[j].Protocol]
+		switch {
+		case iok && jok:
+			return oi < oj
+		case iok:
+			return true
+		case jok:
+			return false
+		default:
+			return out[i].Protocol < out[j].Protocol
+		}
+	})
+
+	return out
+}
+
+func cipherWeaknessesFromSuite(suite string) []string {
+	s := strings.ToUpper(strings.TrimSpace(suite))
+	if s == "" {
+		return nil
+	}
+
+	var weaknesses []string
+	add := func(name string) {
+		for _, existing := range weaknesses {
+			if existing == name {
+				return
+			}
+		}
+		weaknesses = append(weaknesses, name)
+	}
+
+	if strings.Contains(s, "RC4") {
+		add("RC4")
+	}
+	if strings.Contains(s, "3DES") || strings.Contains(s, "_DES_") || strings.Contains(s, "DES40") {
+		add("3DES / SWEET32")
+	}
+	if strings.Contains(s, "EXPORT") {
+		add("Export-grade")
+	}
+	if strings.Contains(s, "_NULL_") || strings.Contains(s, "_ANON_") {
+		add("NULL / Anonymous")
+	}
+	if strings.Contains(s, "_CBC_") {
+		add("CBC")
+	}
+	if strings.HasSuffix(s, "_SHA") {
+		add("SHA-1 MAC")
+	}
+
+	// Forward secrecy typically requires ephemeral DH key exchange.
+	if strings.Contains(s, "_RSA_WITH_") &&
+		!strings.Contains(s, "_DHE_") &&
+		!strings.Contains(s, "_ECDHE_") {
+		add("No Forward Secrecy")
+	}
+
+	return weaknesses
 }
 
 func render(w http.ResponseWriter, data ViewData) {
